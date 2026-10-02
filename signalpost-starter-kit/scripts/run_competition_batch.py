@@ -61,7 +61,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website", "workforce", "external_footprint", "adaptive_plan", "synthesis"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "status_counts": {}}
     planner_telemetry = BatchPlannerTelemetry()
 
     def enrich(profile: dict) -> tuple[dict, dict]:
@@ -114,6 +114,11 @@ def main() -> None:
         if "synthesis" in requested_modules:
             profile = synthesize_company_profile(profile)
 
+        status_counts: dict[str, int] = {}
+        for m in metrics:
+            c = str(m.status)
+            status_counts[c] = status_counts.get(c, 0) + 1
+
         total_reqs = len(metrics) + website_metrics["requests"] + workforce_metrics.get("requests", 0) + footprint_metrics.get("requests", 0)
         cache_hits = 1 if (workforce_metrics.get("requests") == 0 and plan.should_execute("workforce_external_jobs")) else 0
         useful_obs = len((profile.get("external_footprint") or {}).get("all_accepted_observations", []))
@@ -123,11 +128,10 @@ def main() -> None:
             "requests": total_reqs,
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"] + footprint_metrics.get("bytes", 0),
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"] + footprint_metrics.get("latencies_ms", []),
+            "status_counts": status_counts,
         }
         profile["run_metrics"] = metric
         return profile, metric
-
-
 
     state: dict[str, dict] = {}
     resumed_profiles = 0
@@ -151,6 +155,8 @@ def main() -> None:
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
             operations["latencies_ms"].extend(metric["latencies_ms"])
+            for code, cnt in metric.get("status_counts", {}).items():
+                operations["status_counts"][code] = operations["status_counts"].get(code, 0) + cnt
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
                 checkpoint = [state[org] for org in orgs if org in state]
                 write_jsonl(profiles_output, checkpoint)
@@ -167,18 +173,117 @@ def main() -> None:
     latencies = sorted(operations.pop("latencies_ms"))
     operations["p50_ms"] = latencies[len(latencies) // 2] if latencies else None
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
+
+    # Calculate throughput and budget metrics
+    from datetime import datetime
+    t_start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    t_end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    runtime_sec = max(0.001, (t_end - t_start).total_seconds())
+    companies_per_min = round((len(envelopes) / runtime_sec) * 60, 2)
+    reqs_per_co = round(operations["requests"] / max(1, len(envelopes)), 2)
+
+    # Aggregate scaling telemetry across profiles
+    total_obs = 0
+    total_claims = 0
+    total_rejected = 0
+    total_ambiguous = 0
+    total_wrong_company = 0
+    total_conflicts = 0
+    total_changes = 0
+
+    for p in ordered_profiles:
+        fp = p.get("external_footprint") or {}
+        obs = fp.get("all_accepted_observations", [])
+        total_obs += len(obs)
+
+        claims = p.get("grounded_claims") or []
+        total_claims += len(claims)
+
+        rej_fp = fp.get("all_rejected_observations", [])
+        total_rejected += len(rej_fp)
+        for r in rej_fp:
+            exp = str(r.get("reasons", "")).lower()
+            if "different legal entity" in exp or "conflicting_organisation_number" in exp:
+                total_wrong_company += 1
+            elif "ambiguous" in exp:
+                total_ambiguous += 1
+
+        wf_ev = p.get("evidence", {}).get("workforce", {})
+        if wf_ev.get("value"):
+            wf_val = wf_ev["value"]
+            wf_rej = wf_val.get("rejected_candidates", 0)
+            total_rejected += wf_rej
+
+        tprof = p.get("temporal_profile") or {}
+        changes = tprof.get("detected_changes", [])
+        total_changes += len(changes)
+
+        fhist = tprof.get("fact_histories", {})
+        for f, fh in fhist.items():
+            if isinstance(fh, dict):
+                if fh.get("temporal_status") == "conflicting_current":
+                    total_conflicts += 1
+                for alt in fh.get("rejected_alternatives", []):
+                    reason = str(alt.get("reason", "")).lower()
+                    if "conflicting" in reason:
+                        total_conflicts += 1
+                    if "entity" in reason or "wrong" in reason:
+                        total_wrong_company += 1
+
+    status_counts = operations.get("status_counts", {})
+    s429 = status_counts.get("429", 0)
+    s403 = status_counts.get("403", 0)
+    s503 = status_counts.get("503", 0)
+    known_statuses = {"200", "404", "410", "429", "403", "503"}
+    other_errs = sum(cnt for code, cnt in status_counts.items() if code not in known_statuses)
+
+    cache_hits = planner_telemetry.cache_hits_total
+    cache_misses = max(0, operations["requests"] - cache_hits)
+
+    scaling_summary = {
+        "company_count": len(envelopes),
+        "completed_count": len(envelopes),
+        "failed_count": 0,
+        "terminal_envelopes": len(envelopes),
+        "silent_drops": args.expected_count - len(envelopes),
+        "http_requests": operations["requests"],
+        "requests_per_company": reqs_per_co,
+        "runtime_seconds": round(runtime_sec, 2),
+        "companies_per_minute": companies_per_min,
+        "p50_latency_ms": operations.get("p50_ms"),
+        "p95_latency_ms": operations.get("p95_ms"),
+        "status_429_count": s429,
+        "status_403_count": s403,
+        "status_503_count": s503,
+        "other_errors_count": other_errs,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "external_observations": total_obs,
+        "grounded_claims": total_claims,
+        "rejected_candidates": total_rejected,
+        "ambiguous_candidates": total_ambiguous,
+        "wrong_company_candidates": total_wrong_company,
+        "conflicts": total_conflicts,
+        "temporal_changes": total_changes,
+    }
+
     report = {
         "run_id": args.run_id,
         "started_at": started_at,
         "completed_at": completed_at,
+        "runtime_seconds": round(runtime_sec, 2),
+        "companies_per_minute": companies_per_min,
         "expected_count": args.expected_count,
         "emitted_envelopes": len(envelopes),
         "resumed_profiles": resumed_profiles,
         "profiles_fetched_this_run": len(pending_profiles),
+        "requests_per_company": reqs_per_co,
+        "requests_remaining_budget": max(0, 2000 - operations["requests"]),
         "modules": requested_modules,
         "registry": registry_metadata,
         "operations": operations,
         "planner_telemetry": planner_telemetry.summary(),
+        "scaling_summary": scaling_summary,
         "validation": validation,
     }
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)

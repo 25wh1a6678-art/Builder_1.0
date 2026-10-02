@@ -29,6 +29,8 @@ def _utc_now() -> str:
 
 def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchResult:
     last_error = "request failed"
+    last_status = 0
+    last_elapsed = 0
     for attempt in range(attempts):
         started = time.monotonic()
         request = urllib.request.Request(
@@ -46,8 +48,10 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
             if exc.code in {404, 410}:
                 return FetchResult(url, exc.code, elapsed, len(raw), error=f"HTTP {exc.code}", content_sha256=hashlib.sha256(raw).hexdigest(), retrieved_at=_utc_now())
             last_error = f"HTTP {exc.code}"
+            last_status = exc.code
+            last_elapsed = elapsed
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = type(exc).__name__
         if attempt + 1 < attempts:
             time.sleep(0.4 * (2**attempt))
-    return FetchResult(url, 0, 0, 0, error=last_error, retrieved_at=_utc_now())
+    return FetchResult(url, last_status, last_elapsed, 0, error=last_error, retrieved_at=_utc_now())
