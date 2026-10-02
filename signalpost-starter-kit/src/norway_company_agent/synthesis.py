@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from .evidence import evidence, utc_now
+from .temporal import build_company_temporal_profile
 
 
 def _digest(content: str | bytes) -> str:
@@ -312,6 +313,24 @@ def generate_source_backed_explanations(profile: dict[str, Any]) -> list[dict[st
             "content_sha256": _digest(json.dumps(wf_conflicts, sort_keys=True)),
         })
 
+    temporal_prof = profile.get("temporal_profile") or profile.get("temporal")
+    if temporal_prof:
+        m = temporal_prof.get("metrics") or {}
+        curr_cnt = m.get("current_facts_count", 0)
+        hist_cnt = m.get("historical_facts_retained", 0)
+        ch_cnt = m.get("temporal_changes_detected", 0)
+        conf_cnt = m.get("unresolved_conflicts_count", 0)
+        explanations.append({
+            "subject": "Temporal Profiles & Change Detection",
+            "explanation": (
+                f"Anchored {curr_cnt} current fact(s) and retained {hist_cnt} historical variant(s) in deterministic provenance. "
+                f"Detected {ch_cnt} genuine temporal change(s) while isolating {conf_cnt} contemporaneous conflict(s)."
+            ),
+            "source_url": "internal://engine/temporal/v6",
+            "retrieved_at": utc_now(),
+            "content_sha256": _digest(json.dumps(temporal_prof, sort_keys=True)),
+        })
+
     return explanations
 
 
@@ -392,9 +411,23 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
 
 def synthesize_company_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Execute complete synthesis engine on an enriched profile."""
+    # 1. Synthesize multi-year temporal evidence and history
+    temporal_prof = build_company_temporal_profile(profile)
+    profile["temporal_profile"] = temporal_prof.to_dict()
+    profile["temporal"] = temporal_prof.to_dict()
+
     summary = generate_company_summary(profile)
     business_desc = generate_business_description(profile)
     changes = detect_financial_operational_changes(profile)
+    for ch in temporal_prof.detected_changes:
+        if ch.get("field") in {"employees", "ceo", "chair"}:
+            changes.append({
+                "type": f"{ch.get('field')}_temporal_change",
+                "period": f"{ch.get('old_date')} -> {ch.get('new_date')}",
+                "detail": ch.get("explanation"),
+                "source": ch.get("new_source"),
+            })
+
     explanations = generate_source_backed_explanations(profile)
     unknowns = identify_explicit_unknowns(profile)
 
@@ -404,6 +437,7 @@ def synthesize_company_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "financial_operational_changes": changes,
         "source_backed_explanations": explanations,
         "explicit_unknowns": unknowns,
+        "temporal_profile": profile["temporal_profile"],
     }
 
     payload_bytes = json.dumps(synthesis_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")

@@ -45,6 +45,21 @@ class SourceFactVariant:
     authority: float = 0.7
     evidence_span: str = ""
     entity_match_confidence: float = 1.0
+    publication_date: str | None = None
+    effective_date: str | None = None
+    source_freshness: str | None = None
+    temporal_status: str = "unknown_temporal_status"
+    observed_at: str | None = None
+    entity_match_state: str = "verified_match"
+    publishable: bool = True
+
+    def __post_init__(self) -> None:
+        if self.effective_date is None and self.effective_at is not None:
+            self.effective_date = self.effective_at
+        elif self.effective_at is None and self.effective_date is not None:
+            self.effective_at = self.effective_date
+        if self.observed_at is None and self.retrieved_at is not None:
+            self.observed_at = self.retrieved_at
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
