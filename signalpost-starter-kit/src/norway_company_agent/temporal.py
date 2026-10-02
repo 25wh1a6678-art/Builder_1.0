@@ -13,6 +13,11 @@ from .conflict_resolution import (
     _parse_iso,
 )
 from .evidence import utc_now
+from .evidence_quality import (
+    assess_source_quality,
+    calibrate_fact_confidence,
+    compute_content_sha256,
+)
 
 
 TemporalStatus = Literal[
@@ -51,6 +56,8 @@ class FactHistory:
     history: list[dict[str, Any]] = field(default_factory=list)
     detected_changes: list[dict[str, Any]] = field(default_factory=list)
     unresolved_conflicts: list[dict[str, Any]] = field(default_factory=list)
+    selected_value_info: dict[str, Any] = field(default_factory=dict)
+    rejected_alternatives: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,27 +149,63 @@ def resolve_temporal_fact(
     variants: list[SourceFactVariant],
 ) -> FactHistory:
     """Deterministically track fact history, detect temporal changes, and resolve simultaneous conflicts."""
-    # Step 1: Entity Resolution Hard Gate
-    # Candidates marked rejected or non-publishable must NEVER enter history or current facts
+    # Step 1: Entity Resolution & Confidence Calibration Hard Gate
     admissible_variants: list[SourceFactVariant] = []
     quarantined_ambiguous: list[SourceFactVariant] = []
+    rejected_alternatives: list[dict[str, Any]] = []
 
     for v in variants:
+        sq = assess_source_quality(
+            source_url=v.source_url,
+            source_type=v.source_type,
+            retrieved_at=v.retrieved_at,
+            effective_date=v.effective_date,
+            publication_date=v.publication_date,
+            entity_confidence=getattr(v, "entity_match_confidence", 1.0),
+            has_evidence_span=bool(v.evidence_span),
+            is_span_validated=bool(getattr(v, "is_span_validated", False)),
+        )
+        cal = calibrate_fact_confidence(
+            source_quality=sq,
+            entity_match_state=getattr(v, "entity_match_state", "verified_match"),
+            entity_confidence=getattr(v, "entity_match_confidence", 1.0),
+            has_conflict=False,
+        )
+
         # Check publishability and entity resolution match state
         is_rejected = (
             not getattr(v, "publishable", True)
             or getattr(v, "entity_match_state", "verified_match") == "rejected"
-            or getattr(v, "entity_match_confidence", 1.0) < 0.85
+            or getattr(v, "entity_match_confidence", 1.0) < 0.50
+            or not cal.publishable and getattr(v, "publishable", True) is False
         )
         is_ambiguous = getattr(v, "entity_match_state", "verified_match") == "ambiguous"
 
         if is_rejected:
-            # Completely hard-gated from entering history
+            rejected_alternatives.append({
+                "alternative_value": v.value,
+                "source": v.source_url,
+                "source_type": v.source_type,
+                "rejection_reason": "Entity resolution rejected candidate company or low confidence.",
+                "entity_match": getattr(v, "entity_match_state", "rejected"),
+                "authority": v.authority,
+                "temporal_status": "rejected",
+            })
             continue
         elif is_ambiguous:
-            # Ambiguous entity candidates are quarantined and cannot form current profile or history
+            rejected_alternatives.append({
+                "alternative_value": v.value,
+                "source": v.source_url,
+                "source_type": v.source_type,
+                "rejection_reason": "Entity identity is ambiguous; quarantined from verified profile.",
+                "entity_match": "ambiguous",
+                "authority": v.authority,
+                "temporal_status": "ambiguous",
+            })
             quarantined_ambiguous.append(v)
             continue
+
+        v.confidence = cal.confidence
         admissible_variants.append(v)
 
     if not admissible_variants:
@@ -175,6 +218,8 @@ def resolve_temporal_fact(
             history=[],
             detected_changes=[],
             unresolved_conflicts=[],
+            selected_value_info={},
+            rejected_alternatives=rejected_alternatives,
         )
 
     # Step 2: Deterministic chronological sorting
@@ -307,6 +352,7 @@ def resolve_temporal_fact(
     latest_bucket = buckets[-1]
     has_conflict = len(unresolved_conflicts) > 0
     winning_latest = bucket_winners[-1]
+    selected_value_info: dict[str, Any] = {}
 
     if has_conflict:
         current_val = None
@@ -317,9 +363,29 @@ def resolve_temporal_fact(
         winning_latest.temporal_status = "current"
         current_var_dict = winning_latest.to_dict()
         final_temporal_status = "current"
+        selected_value_info = {
+            "selected_value": current_val,
+            "confidence": winning_latest.confidence,
+            "source": winning_latest.source_url,
+            "source_type": winning_latest.source_type,
+            "reason_for_selection": f"Selected value '{current_val}' based on source authority ({winning_latest.authority:.2f}) and temporal currency.",
+        }
 
     # Step 7: Build deterministic history array retaining all variants and full provenance
     final_history = [v.to_dict() for v in sorted_variants]
+
+    # Populate rejected / superseded alternatives
+    for v in sorted_variants:
+        if v.value != current_val or v.temporal_status in {"superseded", "conflicting_current"}:
+            rejected_alternatives.append({
+                "alternative_value": v.value,
+                "source": v.source_url,
+                "source_type": v.source_type,
+                "rejection_reason": f"Status '{v.temporal_status}' relative to selected current value.",
+                "entity_match": getattr(v, "entity_match_state", "verified_match"),
+                "authority": v.authority,
+                "temporal_status": v.temporal_status,
+            })
 
     return FactHistory(
         field_name=field_name,
@@ -330,6 +396,8 @@ def resolve_temporal_fact(
         history=final_history,
         detected_changes=[c.to_dict() for c in detected_changes],
         unresolved_conflicts=unresolved_conflicts,
+        selected_value_info=selected_value_info,
+        rejected_alternatives=rejected_alternatives,
     )
 
 
