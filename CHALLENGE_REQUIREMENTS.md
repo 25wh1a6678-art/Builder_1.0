@@ -214,7 +214,7 @@ V10 Final Evaluation + Submission
 | Version | Recall | Evidence | Synthesis | UX | Total | Requests | Time |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **V0 Baseline** | — | 15/15 foundation | — | — | **23 proxy** | 56 (for 10) | 42s |
-| **V1 Synthesis** | ? | ? | ? | ? | ? | ? | ? |
+| **V1 Synthesis** | — | 15/15 foundation | Complete (10/10) | — | **23 proxy** | 56 (for 10) | 66s |
 | **V2 + Jobs** | ? | ? | ? | ? | ? | ? | ? |
 | **V3 + Reviews** | ? | ? | ? | ? | ? | ? | ? |
 | **V4 Adaptive** | ? | ? | ? | ? | ? | ? | ? |
