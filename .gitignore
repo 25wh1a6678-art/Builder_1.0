@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Large datasets & downloads (exceeds GitHub 100MB limit or bulk data)
+*.csv
+*.csv.gz
+*.gz
+*.zip
+brreg-enheter.csv
+signalpost-universe.jsonl.gz
+signalpost-company-universe-2025.jsonl.gz
+signalpost-starter-kit.zip
+
+# Output & temp artifacts
+*.tmp
+*.log
+out/
+smoke-companies.jsonl
+entry-companies.jsonl
