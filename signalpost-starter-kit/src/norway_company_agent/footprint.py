@@ -370,20 +370,26 @@ def extract_contact_and_location_signals(profile: dict[str, Any]) -> dict[str, A
     }
 
 
-def research_external_footprint(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def research_external_footprint(profile: dict[str, Any], plan: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Research and assemble the full evidence-backed external footprint for a company."""
     all_accepted: list[dict[str, Any]] = []
     all_rejected: list[dict[str, Any]] = []
 
-    # 1. Company website and verified social channels
-    web_accepted, web_rejected = extract_website_footprint_observations(profile)
-    all_accepted.extend(web_accepted)
-    all_rejected.extend(web_rejected)
+    # 1. Company website and verified social channels (Adaptive)
+    should_crawl_web = plan.should_execute("footprint_website") if plan is not None else True
+    if should_crawl_web:
+        web_accepted, web_rejected = extract_website_footprint_observations(profile)
+        all_accepted.extend(web_accepted)
+        all_rejected.extend(web_rejected)
 
-    # 2. Reviews and local presence
-    rev_accepted, rev_rejected, rev_metrics = research_local_reviews_and_presence(profile)
-    all_accepted.extend(rev_accepted)
-    all_rejected.extend(rev_rejected)
+    # 2. Reviews and local presence (Adaptive)
+    should_query_reviews = plan.should_execute("reviews_local_presence") if plan is not None else True
+    if should_query_reviews:
+        rev_accepted, rev_rejected, rev_metrics = research_local_reviews_and_presence(profile)
+        all_accepted.extend(rev_accepted)
+        all_rejected.extend(rev_rejected)
+    else:
+        rev_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
 
     # 3. Grounded contact and location signals
     contact_locs = extract_contact_and_location_signals(profile)
@@ -418,3 +424,4 @@ def research_external_footprint(profile: dict[str, Any]) -> tuple[dict[str, Any]
     }
 
     return ev_record, operations_metric
+

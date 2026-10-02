@@ -7,6 +7,11 @@ from typing import Any
 from .evidence import evidence, utc_now
 
 
+def _digest(content: str | bytes) -> str:
+    raw = content.encode("utf-8") if isinstance(content, str) else content
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _format_currency(amount: float | int | None) -> str:
     if amount is None:
         return "N/A"
@@ -283,6 +288,20 @@ def generate_source_backed_explanations(profile: dict[str, Any]) -> list[dict[st
             "content_sha256": fp_ev.get("content_sha256", ""),
         })
 
+    if "adaptive_plan" in profile:
+        plan_dict = profile["adaptive_plan"]
+        arch = plan_dict.get("archetype", "unknown")
+        sel = len(plan_dict.get("paths_selected", []))
+        skp = len(plan_dict.get("paths_skipped", []))
+        saved = plan_dict.get("estimated_requests_saved", 0)
+        explanations.append({
+            "subject": "Adaptive Research Planner",
+            "explanation": f"Classified company as '{arch}'. Dynamically allocated {sel} high-yield research path(s) and skipped {skp} irrelevant/speculative path(s) ({saved} estimated requests saved).",
+            "source_url": "internal://engine/planner/v4",
+            "retrieved_at": utc_now(),
+            "content_sha256": _digest(json.dumps(plan_dict, sort_keys=True)),
+        })
+
     return explanations
 
 
@@ -290,6 +309,7 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
     """Declare unobserved or unverifiable items explicitly rather than guessing or outputting zero."""
     unknowns = []
     evidence_dict = profile.get("evidence", {})
+    skip_reasons = (profile.get("adaptive_plan") or {}).get("skip_reasons", {})
 
     # Workforce unknown
     if profile.get("employees") is None:
@@ -302,19 +322,21 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
     # Hiring activity unknown
     wf_val = profile.get("workforce") or (evidence_dict.get("workforce", {}).get("value") or {})
     if not wf_val.get("job_openings"):
+        skip_reason = skip_reasons.get("workforce_external_jobs")
         unknowns.append({
             "field": "hiring_activity",
-            "state": "not_available",
-            "explanation": "No active job openings observed across public sources (company website, job boards).",
+            "state": "not_applicable" if skip_reason else "not_available",
+            "explanation": skip_reason or "No active job openings observed across public sources (company website, job boards).",
         })
 
     # Group structure unknown
     group_ev = evidence_dict.get("group", {})
-    if group_ev.get("status") in {"not_found", "not_applicable"}:
+    if group_ev.get("status") in {"not_found", "not_applicable"} or "group" in skip_reasons:
+        skip_reason = skip_reasons.get("group")
         unknowns.append({
             "field": "group_structure",
-            "state": "not_applicable" if group_ev.get("status") == "not_applicable" else "not_found",
-            "explanation": "Company has no corporate group structure or subsidiary relations registered in BRREG konsernstruktur API.",
+            "state": "not_applicable" if (group_ev.get("status") == "not_applicable" or skip_reason) else "not_found",
+            "explanation": skip_reason or "Company has no corporate group structure or subsidiary relations registered in BRREG konsernstruktur API.",
         })
 
     # Website unknown
@@ -335,12 +357,14 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
     # Customer Reviews & Sentiment unknown
     fp_val = (evidence_dict.get("external_footprint", {}).get("value") or {})
     sentiment_info = fp_val.get("sentiment") or {}
-    if sentiment_info.get("status") in {"abstain", "not_available"}:
+    if sentiment_info.get("status") in {"abstain", "not_available"} or "reviews_local_presence" in skip_reasons:
+        skip_reason = skip_reasons.get("reviews_local_presence")
         unknowns.append({
             "field": "customer_reviews_sentiment",
-            "state": "abstain",
-            "explanation": "Fewer than required independent review sources to form a statistically sound consensus without risking ungrounded sentiment bias.",
+            "state": "not_applicable" if skip_reason else "abstain",
+            "explanation": skip_reason or "Fewer than required independent review sources to form a statistically sound consensus without risking ungrounded sentiment bias.",
         })
+
 
 
     # Financials unknown

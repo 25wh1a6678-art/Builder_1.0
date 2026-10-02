@@ -263,6 +263,7 @@ def query_external_job_board(
 def research_workforce_and_jobs(
     profile: dict[str, Any],
     cache_dir: str | Path | None = None,
+    plan: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Execute complete V2 workforce & jobs research layer."""
     org = profile.get("organisation_number")
@@ -275,10 +276,15 @@ def research_workforce_and_jobs(
     # 2. Verified Website Career Signals
     website_signals, web_rej_entity, web_rej_evidence = extract_website_career_signals(profile)
 
-    # 3. External Job Board
-    external_jobs, ext_status, ext_rej_entity, ext_rej_evidence = query_external_job_board(
-        company_name, org, cache_dir=c_dir
-    )
+    # 3. External Job Board (Adaptive)
+    should_query_jobs = plan.should_execute("workforce_external_jobs") if plan is not None else True
+    if should_query_jobs:
+        external_jobs, ext_status, ext_rej_entity, ext_rej_evidence = query_external_job_board(
+            company_name, org, cache_dir=c_dir
+        )
+    else:
+        external_jobs, ext_status, ext_rej_entity, ext_rej_evidence = [], "skipped_by_planner", 0, 0
+
 
     total_rejected_entity = web_rej_entity + ext_rej_entity
     total_rejected_evidence = web_rej_evidence + ext_rej_evidence
