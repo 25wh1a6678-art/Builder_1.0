@@ -89,6 +89,14 @@ def generate_company_summary(profile: dict[str, Any]) -> str:
     elif wf.get("hiring_activity") == "career_section_observed":
         parts.append("Hiring: Career section observed on official website.")
 
+    # External Web Footprint & Reviews
+    fp = profile.get("external_footprint") or (profile.get("evidence", {}).get("external_footprint", {}).get("value") or {})
+    platforms = fp.get("platforms") or []
+    if platforms:
+        parts.append(f"Footprint: Observed on {len(platforms)} platform(s) ({', '.join(platforms)}).")
+    if fp.get("review_signal_count", 0) > 0:
+        parts.append(f"Reviews: {fp['review_signal_count']} verified review/place signal(s).")
+
     return " ".join(parts)
 
 
@@ -103,10 +111,14 @@ def generate_business_description(profile: dict[str, Any]) -> str:
     website_evidence = profile.get("evidence", {}).get("website", {})
     website_val = website_evidence.get("value") or {}
     web_desc = website_val.get("description") if website_val.get("identity_assessment", {}).get("publishable", True) else ""
+    web_excerpt = website_val.get("main_text_excerpt", "")[:250].strip() if website_val.get("identity_assessment", {}).get("publishable", True) else ""
 
     descriptions = []
     if web_desc:
         descriptions.append(f"Company description: {web_desc.strip()}")
+    elif web_excerpt:
+        descriptions.append(f"Company overview: {web_excerpt}...")
+
     if purpose:
         descriptions.append(f"Statutory purpose: {purpose.strip()}")
     elif activity:
@@ -114,6 +126,7 @@ def generate_business_description(profile: dict[str, Any]) -> str:
 
     descriptions.append(f"Industry classification: NACE {industry_code} - {industry_label}.")
     return " ".join(descriptions)
+
 
 
 def detect_financial_operational_changes(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -256,6 +269,20 @@ def generate_source_backed_explanations(profile: dict[str, Any]) -> list[dict[st
             "content_sha256": wf_ev.get("content_sha256", ""),
         })
 
+    if "external_footprint" in evidence_dict:
+        fp_ev = evidence_dict["external_footprint"]
+        fp_val = fp_ev.get("value") or {}
+        obs_count = fp_val.get("accepted_observations", 0)
+        platforms = fp_val.get("platforms", [])
+        reviews = fp_val.get("review_signal_count", 0)
+        explanations.append({
+            "subject": "External Web Footprint & Reviews",
+            "explanation": f"Discovered {obs_count} verified external observation(s) across {len(platforms)} platform(s) ({', '.join(platforms) if platforms else 'none'}). Customer review signals: {reviews}. Strict entity resolution and rights validation enforced.",
+            "source_url": fp_ev.get("source_url", ""),
+            "retrieved_at": fp_ev.get("retrieved_at", ""),
+            "content_sha256": fp_ev.get("content_sha256", ""),
+        })
+
     return explanations
 
 
@@ -305,6 +332,17 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
             "explanation": "Website was reachable, but identity matching gate could not conclusively verify exact legal entity tokens. Facts quarantined.",
         })
 
+    # Customer Reviews & Sentiment unknown
+    fp_val = (evidence_dict.get("external_footprint", {}).get("value") or {})
+    sentiment_info = fp_val.get("sentiment") or {}
+    if sentiment_info.get("status") in {"abstain", "not_available"}:
+        unknowns.append({
+            "field": "customer_reviews_sentiment",
+            "state": "abstain",
+            "explanation": "Fewer than required independent review sources to form a statistically sound consensus without risking ungrounded sentiment bias.",
+        })
+
+
     # Financials unknown
     fin_ev = evidence_dict.get("financials", {})
     if fin_ev.get("status") != "available":
@@ -349,4 +387,7 @@ def synthesize_company_profile(profile: dict[str, Any]) -> dict[str, Any]:
 
     profile["synthesis"] = synthesis_payload
     profile["evidence"]["synthesis"] = synthesis_evidence
+    if "external_footprint" in profile.get("evidence", {}):
+        profile["external_footprint"] = profile["evidence"]["external_footprint"].get("value")
     return profile
+
