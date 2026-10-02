@@ -105,11 +105,13 @@ def generate_company_summary(profile: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+from .conflict_resolution import resolve_business_description_conflict
+
+
 def generate_business_description(profile: dict[str, Any]) -> str:
-    """Extract and synthesize business purpose and operational description."""
+    """Extract and synthesize business purpose and operational description using conflict resolution."""
     raw_registry = (profile.get("evidence", {}).get("registry", {}).get("value") or {})
-    purpose = raw_registry.get("vedtektsfestetFormaal") or ""
-    activity = raw_registry.get("aktivitet") or ""
+    purpose = raw_registry.get("vedtektsfestetFormaal") or raw_registry.get("aktivitet") or ""
     industry_code = profile.get("industry_code") or ""
     industry_label = profile.get("industry_label") or ""
 
@@ -118,19 +120,16 @@ def generate_business_description(profile: dict[str, Any]) -> str:
     web_desc = website_val.get("description") if website_val.get("identity_assessment", {}).get("publishable", True) else ""
     web_excerpt = website_val.get("main_text_excerpt", "")[:250].strip() if website_val.get("identity_assessment", {}).get("publishable", True) else ""
 
-    descriptions = []
-    if web_desc:
-        descriptions.append(f"Company description: {web_desc.strip()}")
-    elif web_excerpt:
-        descriptions.append(f"Company overview: {web_excerpt}...")
-
-    if purpose:
-        descriptions.append(f"Statutory purpose: {purpose.strip()}")
-    elif activity:
-        descriptions.append(f"Registered activity: {activity.strip()}")
-
-    descriptions.append(f"Industry classification: NACE {industry_code} - {industry_label}.")
+    resolved_rec = resolve_business_description_conflict(
+        statutory_purpose=purpose,
+        website_description=web_desc or web_excerpt,
+        website_url=website_val.get("final_url", ""),
+    )
+    descriptions = [resolved_rec.selected_value] if resolved_rec.selected_value else []
+    if industry_code:
+        descriptions.append(f"Industry classification: NACE {industry_code} - {industry_label}.")
     return " ".join(descriptions)
+
 
 
 
@@ -302,7 +301,19 @@ def generate_source_backed_explanations(profile: dict[str, Any]) -> list[dict[st
             "content_sha256": _digest(json.dumps(plan_dict, sort_keys=True)),
         })
 
+    wf_conflicts = (profile.get("workforce") or {}).get("conflicts", [])
+    if wf_conflicts:
+        c_count = len(wf_conflicts)
+        explanations.append({
+            "subject": "Entity & Conflict Resolution",
+            "explanation": f"Evaluated {c_count} multi-source claim(s). Enforced statutory registry precedence for verified workforce facts while preserving full source provenance.",
+            "source_url": "internal://engine/conflict_resolution/v5",
+            "retrieved_at": utc_now(),
+            "content_sha256": _digest(json.dumps(wf_conflicts, sort_keys=True)),
+        })
+
     return explanations
+
 
 
 def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:

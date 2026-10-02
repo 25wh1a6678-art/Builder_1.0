@@ -12,6 +12,8 @@ import urllib.error
 
 from .evidence import evidence, utc_now
 from .identity import _tokens
+from .entity_resolution import resolve_candidate_entity
+from .conflict_resolution import SourceFactVariant, resolve_scalar_conflict
 
 
 CAREER_URL_PATTERNS = re.compile(
@@ -167,8 +169,9 @@ def query_external_job_board(
     company_name: str,
     org_no: str,
     cache_dir: Path | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, int]:
-    """Query permitted external job board with caching, strict entity matching, and graceful rate handling."""
+    """Query permitted external job board with caching, multi-signal entity matching, and graceful rate handling."""
     job_openings: list[dict[str, Any]] = []
     rejected_entity = 0
     rejected_evidence = 0
@@ -203,12 +206,31 @@ def query_external_job_board(
             for hit in hits:
                 src = hit.get("_source") or {}
                 employer_name = (src.get("employer") or {}).get("name") or src.get("businessName") or ""
-                
-                # Strict Entity Resolution Gate
-                is_match, ratio, overlap = _entity_match(employer_name, company_name)
-                if not is_match:
-                    rejected_entity += 1
-                    continue
+                candidate_org = (src.get("employer") or {}).get("orgnr")
+                locations = src.get("locationList") or []
+                loc_str = locations[0].get("city") or locations[0].get("address") if locations else "Norway"
+
+                # Multi-Signal Entity Resolution Gate
+                cand_data = {
+                    "id": src.get("uuid"),
+                    "name": employer_name,
+                    "organisation_number": candidate_org,
+                    "address": loc_str,
+                }
+                if profile:
+                    res = resolve_candidate_entity(profile, cand_data)
+                    if not res.publishable:
+                        rejected_entity += 1
+                        continue
+                    match_info = res.to_dict()
+                    conf = res.confidence
+                else:
+                    is_match, ratio, _ = _entity_match(employer_name, company_name)
+                    if not is_match:
+                        rejected_entity += 1
+                        continue
+                    match_info = {"match_state": "verified_match", "confidence": ratio}
+                    conf = ratio
 
                 title = src.get("title")
                 uuid = src.get("uuid")
@@ -216,8 +238,6 @@ def query_external_job_board(
                     rejected_evidence += 1
                     continue
 
-                locations = src.get("locationList") or []
-                loc_str = locations[0].get("city") or locations[0].get("address") if locations else "Norway"
                 job_url = f"https://arbeidsplassen.nav.no/stillinger/stilling/{uuid}"
                 pub_date = src.get("published")
 
@@ -233,7 +253,8 @@ def query_external_job_board(
                     "retrieved_at": utc_now(),
                     "content_sha256": _digest(f"{uuid}|{title}|{employer_name}"),
                     "evidence_span": f"Job posting: '{title}' by '{employer_name}' in {loc_str}. Posted: {pub_date or 'N/A'}",
-                    "confidence": min(0.99, max(0.85, ratio)),
+                    "confidence": min(0.99, max(0.85, conf)),
+                    "entity_match_result": match_info,
                 })
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
@@ -242,6 +263,7 @@ def query_external_job_board(
             status = "source_error"
     except Exception:
         status = "source_error"
+
 
     if cache_dir:
         try:
@@ -280,11 +302,10 @@ def research_workforce_and_jobs(
     should_query_jobs = plan.should_execute("workforce_external_jobs") if plan is not None else True
     if should_query_jobs:
         external_jobs, ext_status, ext_rej_entity, ext_rej_evidence = query_external_job_board(
-            company_name, org, cache_dir=c_dir
+            company_name, org, cache_dir=c_dir, profile=profile
         )
     else:
         external_jobs, ext_status, ext_rej_entity, ext_rej_evidence = [], "skipped_by_planner", 0, 0
-
 
     total_rejected_entity = web_rej_entity + ext_rej_entity
     total_rejected_evidence = web_rej_evidence + ext_rej_evidence
@@ -303,19 +324,38 @@ def research_workforce_and_jobs(
 
     workforce_status = "available" if (has_workforce or has_jobs) else ext_status if ext_status == "blocked" else "not_available"
 
+    # Conflict resolution for workforce
+    conflicts: list[dict[str, Any]] = []
+    official_emp = profile.get("employees")
+    if official_emp is not None:
+        variants = [
+            SourceFactVariant(
+                value=official_emp,
+                source_url="https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                source_type="official_registry_bulk",
+                retrieved_at=utc_now(),
+                authority=1.0,
+                evidence_span=f"Aa-registeret registered employee count: {official_emp}",
+            )
+        ]
+        conflicts.append(resolve_scalar_conflict("employees", variants).to_dict())
+
     workforce_payload = {
         "organisation_number": org,
         "company_name": company_name,
         "workforce_signals": all_signals,
         "job_openings": all_job_openings,
         "hiring_activity": hiring_activity,
+        "conflicts": conflicts,
         "metrics": {
             "workforce_signals_count": len(all_signals),
             "job_openings_count": len(all_job_openings),
             "rejected_by_entity_resolution": total_rejected_entity,
             "rejected_insufficient_evidence": total_rejected_evidence,
+            "conflicts_detected": sum(bool(c.get("has_conflict")) for c in conflicts),
         },
     }
+
 
     payload_json = json.dumps(workforce_payload, sort_keys=True, ensure_ascii=False)
     content_sha256 = _digest(payload_json)

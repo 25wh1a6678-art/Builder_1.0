@@ -22,6 +22,8 @@ from .external_footprint import (
     validate_observation,
 )
 from .identity import _tokens
+from .entity_resolution import resolve_candidate_entity
+
 
 
 REVIEWS_CACHE_DIR = Path("out/cache/reviews")
@@ -244,12 +246,19 @@ def research_local_reviews_and_presence(profile: dict[str, Any]) -> tuple[list[d
     if html and cached_data.get("status_code") == 200:
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(" ", strip=True)
-        # Exact entity resolution gate: legal name and org number must be in text
-        exact = name.casefold() in text.casefold() and org in re.sub(r"\D", "", text)
-        if not exact:
+        # Multi-signal Entity Resolution Gate
+        cand = {
+            "id": f"fagfolk-{org}",
+            "name": name,
+            "organisation_number": org,
+            "text": text,
+            "url": cached_data.get("url") or "",
+        }
+        res = resolve_candidate_entity(profile, cand)
+        if not res.publishable:
             rejected_obs.append({
                 "id": f"fagfolk-{org}",
-                "reasons": ["candidate page text failed exact legal name and organisation number match"],
+                "reasons": [res.explanation] + res.rejected_signals,
             })
             return accepted_obs, rejected_obs, metrics
 
@@ -292,6 +301,7 @@ def research_local_reviews_and_presence(profile: dict[str, Any]) -> tuple[list[d
                 "exact_entity": True,
                 "identity_proof": [
                     {"type": "exact_legal_name_and_org_on_page", "name": name, "org": org},
+                    {"type": "multi_signal_entity_resolution", "match_state": res.match_state, "confidence": res.confidence},
                 ],
                 "acquisition_mode": "permitted_public_page",
                 "rights_status": "approved",
@@ -301,8 +311,10 @@ def research_local_reviews_and_presence(profile: dict[str, Any]) -> tuple[list[d
                     "rating": rating_val,
                     "review_count": review_count,
                     "scale": 5,
+                    "entity_match_confidence": res.confidence,
                 },
             }
+
             val_errs = validate_observation(obs)
             if not val_errs:
                 accepted_obs.append(obs)
