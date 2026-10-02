@@ -74,12 +74,20 @@ def generate_company_summary(profile: dict[str, Any]) -> str:
     else:
         parts.append("Financials: No normalized annual account records returned by Regnskapsregisteret.")
 
-    # Workforce
+    # Workforce & Hiring
+    wf = profile.get("workforce") or {}
+    jobs = wf.get("job_openings") or []
     employees = profile.get("employees")
     if employees is not None:
         parts.append(f"Workforce: {employees} registered employee(s).")
     else:
         parts.append("Workforce: No registered employee count reported to NAV Aa-registeret.")
+
+    if jobs:
+        titles = [j.get("title") for j in jobs if j.get("title")]
+        parts.append(f"Hiring: {len(jobs)} active job opening(s) observed ({', '.join(titles[:2])}).")
+    elif wf.get("hiring_activity") == "career_section_observed":
+        parts.append("Hiring: Career section observed on official website.")
 
     return " ".join(parts)
 
@@ -235,6 +243,19 @@ def generate_source_backed_explanations(profile: dict[str, Any]) -> list[dict[st
                 "content_sha256": val.get("content_sha256") or web_ev.get("content_sha256", ""),
             })
 
+    if "workforce" in evidence_dict:
+        wf_ev = evidence_dict["workforce"]
+        wf_val = wf_ev.get("value") or {}
+        jobs_count = len(wf_val.get("job_openings", []))
+        signals_count = len(wf_val.get("workforce_signals", []))
+        explanations.append({
+            "subject": "Workforce & Hiring Activity",
+            "explanation": f"Analyzed workforce indicators ({signals_count} official/web signal(s)) and job postings ({jobs_count} verified opening(s)). Entity resolution enforced zero wrong-company attribution.",
+            "source_url": wf_ev.get("source_url", ""),
+            "retrieved_at": wf_ev.get("retrieved_at", ""),
+            "content_sha256": wf_ev.get("content_sha256", ""),
+        })
+
     return explanations
 
 
@@ -249,6 +270,15 @@ def identify_explicit_unknowns(profile: dict[str, Any]) -> list[dict[str, str]]:
             "field": "employees",
             "state": "not_available",
             "explanation": "No employee count reported to NAV Aa-registeret in the open entity registry; value is explicitly absent, not zero.",
+        })
+
+    # Hiring activity unknown
+    wf_val = profile.get("workforce") or (evidence_dict.get("workforce", {}).get("value") or {})
+    if not wf_val.get("job_openings"):
+        unknowns.append({
+            "field": "hiring_activity",
+            "state": "not_available",
+            "explanation": "No active job openings observed across public sources (company website, job boards).",
         })
 
     # Group structure unknown

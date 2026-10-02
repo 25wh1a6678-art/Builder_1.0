@@ -16,6 +16,7 @@ from norway_company_agent.identity import apply_website_identity_gate  # noqa: E
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.synthesis import synthesize_company_profile  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
+from norway_company_agent.workforce import research_workforce_and_jobs  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -39,7 +40,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website,synthesis")
+    parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website,workforce,synthesis")
     args = parser.parse_args()
 
     started_at = utc_now()
@@ -54,7 +55,7 @@ def main() -> None:
             if key in annotations[profile["organisation_number"]]:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
-    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website", "synthesis"}
+    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website", "workforce", "synthesis"}
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
@@ -64,10 +65,14 @@ def main() -> None:
         if "website" in requested_modules:
             website_record, website_metrics = fetch_website(profile.get("website"))
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+        workforce_metrics = {"requests": 0}
+        if "workforce" in requested_modules:
+            wf_record, workforce_metrics = research_workforce_and_jobs(profile)
+            profile["evidence"]["workforce"] = wf_record
         if "synthesis" in requested_modules:
             profile = synthesize_company_profile(profile)
         metric = {
-            "requests": len(metrics) + website_metrics["requests"],
+            "requests": len(metrics) + website_metrics["requests"] + workforce_metrics.get("requests", 0),
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
         }
