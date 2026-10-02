@@ -286,6 +286,7 @@ def plan_company_research(
     profile: dict[str, Any],
     deduplicator: RequestDeduplicator | None = None,
     consecutive_diminishing_returns: dict[str, int] | None = None,
+    use_bulk_baseline: bool | None = None,
 ) -> AdaptiveResearchPlan:
     """Dynamically determine the optimal, expected-yield routed research paths for a company."""
     org = str(profile.get("organisation_number") or "")
@@ -323,6 +324,10 @@ def plan_company_research(
     fields_na: list[str] = []
     ext_missing: list[str] = list(EXTERNAL_TARGET_FIELDS)
 
+    # Check if bulk baseline is active (e.g. from profiles_from_bulk)
+    if use_bulk_baseline is None:
+        use_bulk_baseline = bool(profile.get("evidence", {}).get("registry")) or bool(profile.get("raw")) or bool(profile.get("use_bulk_baseline", False))
+
     for path in ALL_RESEARCH_PATHS:
         cost = 2 if path in {"website_crawl", "footprint_website"} else 1
         dim_count = diminishing.get(path, 0)
@@ -337,11 +342,75 @@ def plan_company_research(
             expected_yields[path] = 0.0
             continue
 
-        if path in {"registry_live", "accounting_obligation", "roles", "locations", "workforce_official"}:
+        if path == "registry_live":
+            if use_bulk_baseline:
+                skipped.append(path)
+                skip_reasons[path] = "Core statutory entity facts fully satisfied by local statutory registry snapshot; redundant live HTTP call avoided."
+                requests_saved += cost
+                routing_adapted = True
+                fields_supported.append("registry_live")
+                expected_yields[path] = 0.0
+            else:
+                selected.append(path)
+                requests_estimate += cost
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                expected_yields[path] = ey
+            continue
+
+        if path in {"accounting_obligation", "workforce_official"}:
             selected.append(path)
-            requests_estimate += cost
-            ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+            requests_estimate += 0
+            ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, 1)
             expected_yields[path] = ey
+            continue
+
+        if path == "roles":
+            if use_bulk_baseline:
+                if archetype in {CompanyArchetype.COMMERCIAL_OPERATING, CompanyArchetype.HOLDING_INVESTMENT, CompanyArchetype.RESIDENTIAL_HOUSING} or (employees is not None and employees > 0) or website_declared:
+                    selected.append(path)
+                    requests_estimate += cost
+                    ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                    expected_yields[path] = ey
+                else:
+                    skipped.append(path)
+                    skip_reasons[path] = "Small or dormant entity without active workforce or commercial website; governance roles query deferred."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("governance_roles")
+                    expected_yields[path] = 0.0
+            else:
+                selected.append(path)
+                requests_estimate += cost
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                expected_yields[path] = ey
+            continue
+
+        if path == "locations":
+            if use_bulk_baseline:
+                if archetype == CompanyArchetype.COMMERCIAL_OPERATING or (employees is not None and employees > 0):
+                    selected.append(path)
+                    requests_estimate += cost
+                    ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                    expected_yields[path] = ey
+                elif archetype == CompanyArchetype.RESIDENTIAL_HOUSING:
+                    skipped.append(path)
+                    skip_reasons[path] = "Residential housing associations do not maintain commercial operating subunits."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("subunit_locations")
+                    expected_yields[path] = 0.0
+                else:
+                    skipped.append(path)
+                    skip_reasons[path] = "Entity without registered active employees does not maintain distinct operational subunit locations."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("subunit_locations")
+                    expected_yields[path] = 0.0
+            else:
+                selected.append(path)
+                requests_estimate += cost
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                expected_yields[path] = ey
             continue
 
         if path == "financials":
@@ -367,6 +436,21 @@ def plan_company_research(
                 routing_adapted = True
                 fields_na.append("group_structure")
                 expected_yields[path] = 0.0
+            elif use_bulk_baseline:
+                raw = profile.get("evidence", {}).get("registry", {}).get("value") or profile.get("raw") or {}
+                in_group = str(raw.get("erIKonsern") or "").lower() == "ja" or bool(raw.get("overordnetEnhet"))
+                if in_group:
+                    selected.append(path)
+                    requests_estimate += cost
+                    ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                    expected_yields[path] = ey
+                else:
+                    skipped.append(path)
+                    skip_reasons[path] = "Statutory snapshot reports entity is not part of a corporate group (erIKonsern!=Ja, no parent entity); redundant 404 query avoided."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("group_structure")
+                    expected_yields[path] = 0.0
             else:
                 selected.append(path)
                 requests_estimate += cost
@@ -404,6 +488,13 @@ def plan_company_research(
                 routing_adapted = True
                 fields_na.append("hiring_activity")
                 expected_yields[path] = 0.0
+            elif use_bulk_baseline and archetype == CompanyArchetype.SMALL_OR_DORMANT and not is_commercial:
+                skipped.append(path)
+                skip_reasons[path] = "Small or dormant entity with zero registered employees does not recruit operational staff on public job boards."
+                requests_saved += cost
+                routing_adapted = True
+                fields_na.append("hiring_activity")
+                expected_yields[path] = 0.0
             else:
                 selected.append(path)
                 requests_estimate += cost
@@ -422,6 +513,13 @@ def plan_company_research(
             elif archetype == CompanyArchetype.HOLDING_INVESTMENT:
                 skipped.append(path)
                 skip_reasons[path] = "Holding and equity entities have no commercial consumer foot-traffic or customer review profiles."
+                requests_saved += cost
+                routing_adapted = True
+                fields_na.append("customer_reviews_sentiment")
+                expected_yields[path] = 0.0
+            elif use_bulk_baseline and archetype == CompanyArchetype.SMALL_OR_DORMANT and not is_commercial:
+                skipped.append(path)
+                skip_reasons[path] = "Small or dormant entity without active consumer-facing operations has no commercial customer review profiles."
                 requests_saved += cost
                 routing_adapted = True
                 fields_na.append("customer_reviews_sentiment")

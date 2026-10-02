@@ -170,6 +170,72 @@ def normalize_entity(body: Any) -> dict[str, Any]:
     }
 
 
+def snapshot_normalized_entity(profile: dict[str, Any]) -> dict[str, Any]:
+    raw = profile.get("evidence", {}).get("registry", {}).get("value") or profile.get("raw") or {}
+
+    business_address = None
+    if raw.get("forretningsadresse.kommune") or raw.get("forretningsadresse.postnummer") or raw.get("forretningsadresse.adresse"):
+        addr_lines = [raw.get("forretningsadresse.adresse")] if raw.get("forretningsadresse.adresse") else []
+        business_address = {
+            "adresse": addr_lines,
+            "postnummer": raw.get("forretningsadresse.postnummer"),
+            "poststed": raw.get("forretningsadresse.poststed"),
+            "kommune": raw.get("forretningsadresse.kommune"),
+            "kommunenummer": raw.get("forretningsadresse.kommunenummer"),
+            "land": raw.get("forretningsadresse.land", "Norge"),
+            "landkode": raw.get("forretningsadresse.landkode", "NO"),
+        }
+
+    postal_address = None
+    if raw.get("postadresse.kommune") or raw.get("postadresse.postnummer") or raw.get("postadresse.adresse"):
+        post_lines = [raw.get("postadresse.adresse")] if raw.get("postadresse.adresse") else []
+        postal_address = {
+            "adresse": post_lines,
+            "postnummer": raw.get("postadresse.postnummer"),
+            "poststed": raw.get("postadresse.poststed"),
+            "kommune": raw.get("postadresse.kommune"),
+            "kommunenummer": raw.get("postadresse.kommunenummer"),
+            "land": raw.get("postadresse.land", "Norge"),
+            "landkode": raw.get("postadresse.landkode", "NO"),
+        }
+
+    industry = None
+    if raw.get("naeringskode1.kode") or profile.get("industry_code"):
+        industry = {
+            "kode": raw.get("naeringskode1.kode") or profile.get("industry_code"),
+            "beskrivelse": raw.get("naeringskode1.beskrivelse") or profile.get("industry_label"),
+        }
+
+    return {
+        "organisation_number": profile.get("organisation_number"),
+        "name": profile.get("name") or raw.get("navn"),
+        "legal_form": profile.get("legal_form") or raw.get("organisasjonsform.kode"),
+        "employees": profile.get("employees"),
+        "bankrupt": profile.get("bankrupt", False),
+        "liquidating": profile.get("liquidating", False),
+        "website": profile.get("website") or raw.get("hjemmeside") or None,
+        "industry": industry,
+        "business_address": business_address,
+        "postal_address": postal_address,
+        "latest_submitted_accounts": profile.get("latest_submitted_accounts") or raw.get("sisteInnsendteAarsregnskap"),
+    }
+
+
+def serve_snapshot_registry_live(profile: dict[str, Any]) -> dict[str, Any]:
+    reg_ev = profile.get("evidence", {}).get("registry", {})
+    return evidence(
+        "registry_live",
+        "available",
+        "statutory_registry_snapshot",
+        "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+        value=snapshot_normalized_entity(profile),
+        retrieved_at=reg_ev.get("retrieved_at") or utc_now(),
+        content_sha256=reg_ev.get("content_sha256"),
+        source_row_key=profile.get("organisation_number"),
+        note="Served from Tier 1 local statutory registry snapshot (brreg-enheter.csv)",
+    )
+
+
 def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
     if result.status == 200:
         return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)

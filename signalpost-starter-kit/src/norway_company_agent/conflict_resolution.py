@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 SOURCE_AUTHORITY_RANK = {
     "official_registry_bulk": 1.0,
+    "statutory_registry_snapshot": 1.0,
     "official_subunits": 1.0,
     "official_registry_live": 1.0,
     "official_financials": 1.0,

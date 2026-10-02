@@ -372,7 +372,7 @@ def research_workforce_and_jobs(
     )
 
     metrics = {
-        "requests": 1 if ext_status not in {"cached"} else 0,
+        "requests": 1 if (should_query_jobs and ext_status not in {"cached"}) else 0,
         "workforce_signals_count": len(all_signals),
         "job_openings_count": len(all_job_openings),
         "rejected_by_entity_resolution": total_rejected_entity,

@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.evidence import utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
-from norway_company_agent.official import fetch_official_modules  # noqa: E402
+from norway_company_agent.official import fetch_official_modules, serve_snapshot_registry_live  # noqa: E402
 from norway_company_agent.synthesis import synthesize_company_profile  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
 from norway_company_agent.workforce import research_workforce_and_jobs  # noqa: E402
@@ -79,10 +79,24 @@ def main() -> None:
             retrieved_at=utc_now(),
         )
 
-        # 2. Official Modules with Adaptive Group Filtering
-        effective_fetch = fetch_modules
-        if not plan.should_execute("group") and "group" in effective_fetch:
-            effective_fetch = effective_fetch - {"group"}
+        # 2. Official Modules with Tier 1 Snapshot Baseline & Adaptive Expected-Yield Routing
+        effective_fetch = set(fetch_modules)
+        if "registry_live" in effective_fetch:
+            if not plan.should_execute("registry_live"):
+                effective_fetch.remove("registry_live")
+                profile["evidence"]["registry_live"] = serve_snapshot_registry_live(profile)
+
+        for m in ("financials", "roles", "locations", "group"):
+            if m in effective_fetch and not plan.should_execute(m):
+                effective_fetch.remove(m)
+                profile["evidence"][m] = evidence(
+                    m,
+                    "not_applicable",
+                    f"official_{m}",
+                    f"https://data.brreg.no/enhetsregisteret/api/{m}",
+                    note=plan.skip_reasons.get(m, f"Skipped by adaptive expected-yield planner for archetype {plan.archetype.value}"),
+                )
+
         records, metrics = fetch_official_modules(profile["organisation_number"], effective_fetch)
         profile["evidence"].update(records)
 
