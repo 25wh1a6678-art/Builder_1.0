@@ -103,7 +103,7 @@ def main() -> None:
         # 3. Website with Adaptive Crawl Decision
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "website" in requested_modules and plan.should_execute("website_crawl"):
-            website_record, website_metrics = fetch_website(profile.get("website"))
+            website_record, website_metrics = fetch_website(profile.get("website"), profile=profile)
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
         elif "website" in requested_modules:
             profile["evidence"]["website"] = evidence(

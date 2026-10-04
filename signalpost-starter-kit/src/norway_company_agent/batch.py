@@ -86,7 +86,28 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
             break
     missing = [org for org in requested if org not in found]
     if missing:
-        raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
+        from .http import fetch_json
+        from .official import BRREG_ENTITY, normalize_entity
+        for org in missing:
+            res = fetch_json(BRREG_ENTITY.format(org=org))
+            if res.status == 200:
+                norm = normalize_entity(res.body)
+                norm["evidence"] = {
+                    "registry": evidence(
+                        "registry",
+                        "available",
+                        "official_registry_live",
+                        res.url,
+                        value=res.body,
+                        retrieved_at=res.retrieved_at,
+                        content_sha256=res.content_sha256,
+                        source_row_key=org,
+                    ),
+                    "accounting_obligation": accounting_obligation_assessment(norm),
+                }
+                found[org] = norm
+            else:
+                raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
     return [found[org] for org in requested], {
         "registry_snapshot_sha256": snapshot_sha256,
         "registry_rows_scanned": scanned,

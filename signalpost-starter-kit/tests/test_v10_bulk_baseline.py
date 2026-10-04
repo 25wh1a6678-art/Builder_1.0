@@ -96,9 +96,149 @@ class TestV10BulkBaseline(unittest.TestCase):
         housing_profile["legal_form"] = "BRL"
         housing_profile["name"] = "VIK BORETTSLAG"
         housing_profile["industry_code"] = "97.001"
+        housing_profile["latest_submitted_accounts"] = None
+        housing_profile["evidence"] = {
+            "registry": {
+                "value": {
+                    "organisasjonsnummer": "985589003",
+                    "navn": "VIK BORETTSLAG",
+                    "organisasjonsform.kode": "BRL",
+                }
+            }
+        }
         plan = plan_company_research(housing_profile, use_bulk_baseline=True)
         self.assertEqual(plan.archetype, CompanyArchetype.RESIDENTIAL_HOUSING)
         self.assertFalse(plan.should_execute("workforce_external_jobs"))
         self.assertFalse(plan.should_execute("reviews_local_presence"))
         self.assertFalse(plan.should_execute("financials"))
         self.assertFalse(plan.should_execute("group"))
+
+        # Housing with submitted accounts should execute financials
+        housing_with_accounts = dict(housing_profile, latest_submitted_accounts="2025")
+        plan_with_accounts = plan_company_research(housing_with_accounts, use_bulk_baseline=True)
+        self.assertTrue(plan_with_accounts.should_execute("financials"))
+
+    def test_housing_financials_routed_only_when_accounts_present(self):
+        # ESEK entity with latest_submitted_accounts
+        esek_with_accounts = {
+            "organisation_number": "925800023",
+            "name": "SAMEIET LENSMANNSTUNET 1",
+            "legal_form": "ESEK",
+            "industry_code": "97.001",
+            "latest_submitted_accounts": "2025",
+        }
+        plan_esek = plan_company_research(esek_with_accounts, use_bulk_baseline=True)
+        self.assertTrue(plan_esek.should_execute("financials"))
+
+        # ESEK entity without accounts
+        esek_no_accounts = {
+            "organisation_number": "925800023",
+            "name": "SAMEIET LENSMANNSTUNET 1",
+            "legal_form": "ESEK",
+            "industry_code": "97.001",
+            "latest_submitted_accounts": None,
+        }
+        plan_esek_none = plan_company_research(esek_no_accounts, use_bulk_baseline=True)
+        self.assertFalse(plan_esek_none.should_execute("financials"))
+
+    def test_fetch_website_skips_secondary_crawl_when_identity_fails(self):
+        import io
+        from unittest.mock import patch, MagicMock
+        from norway_company_agent.website import fetch_website
+
+        # Mismatched company name (e.g. Butikkdrift vs 7-Eleven)
+        profile = {
+            "organisation_number": "935354293",
+            "name": "BUTIKKDRIFT UMAZABAL GUERRA AS",
+            "website": "www.testfranchise.no",
+        }
+
+        class MockResponse:
+            def __init__(self, content, url):
+                self.raw = io.BytesIO(content)
+                self.url = url
+                self.headers = {"content-type": "text/html; charset=utf-8"}
+            def read(self, n=-1):
+                return self.raw.read(n)
+            def geturl(self):
+                return self.url
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        opened_urls = []
+        def fake_open(req, timeout=15.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            opened_urls.append(url)
+            if "robots.txt" in url:
+                return MockResponse(b"User-agent: *\nAllow: /\n", url)
+            return MockResponse(
+                b"<html><head><title>Franchise Brand HQ</title></head><body>Welcome to Franchise Brand HQ!<a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
+                url,
+            )
+
+        with patch("norway_company_agent.website.assert_public_url", lambda u: None), \
+             patch("norway_company_agent.website.SAFE_OPENER.open", side_effect=fake_open):
+            record, metrics = fetch_website("https://www.testfranchise.no", profile=profile, max_secondary_pages=1)
+            pages = record.get("value", {}).get("pages", [])
+            # Must ONLY contain homepage (1 page) because franchise HQ fails exact legal entity match
+            self.assertEqual(len(pages), 1)
+            # Secondary pages should NOT have been fetched
+            self.assertNotIn("https://www.testfranchise.no/about", opened_urls)
+            self.assertNotIn("https://www.testfranchise.no/contact", opened_urls)
+
+    def test_fetch_website_crawls_secondary_page_when_identity_matches(self):
+        import io
+        from unittest.mock import patch, MagicMock
+        from norway_company_agent.website import fetch_website
+
+        # Matching company name (2 core tokens)
+        profile = {
+            "organisation_number": "888567232",
+            "name": "AAS ELEKTRONIKK AS",
+            "website": "www.aelektronikk.no",
+        }
+
+        class MockResponse:
+            def __init__(self, content, url):
+                self.raw = io.BytesIO(content)
+                self.url = url
+                self.headers = {"content-type": "text/html; charset=utf-8"}
+            def read(self, n=-1):
+                return self.raw.read(n)
+            def geturl(self):
+                return self.url
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        opened_urls = []
+        def fake_open(req, timeout=15.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            opened_urls.append(url)
+            if "robots.txt" in url:
+                return MockResponse(b"User-agent: *\nAllow: /\n", url)
+            if "/om-oss" in url:
+                return MockResponse(
+                    b"<html><head><title>Om oss | Aas Elektronikk AS</title></head><body>Om oss i Aas Elektronikk AS</body></html>",
+                    url,
+                )
+            return MockResponse(
+                b"<html><head><title>Aas Elektronikk AS</title></head><body>Velkommen til Aas Elektronikk AS, vi leverer hoykvalitets elektroniske komponenter og tjenester for industrien over hele landet.<a href='/om-oss'>Om oss</a><a href='/kontakt'>Kontakt</a></body></html>",
+                url,
+            )
+
+        with patch("norway_company_agent.website.assert_public_url", lambda u: None), \
+             patch("norway_company_agent.website.SAFE_OPENER.open", side_effect=fake_open):
+            record, metrics = fetch_website("https://www.aelektronikk.no", profile=profile, max_secondary_pages=1)
+            pages = record.get("value", {}).get("pages", [])
+            # Exactly 2 pages (homepage + 1 priority secondary page)
+            self.assertEqual(len(pages), 2)
+            self.assertIn("https://www.aelektronikk.no/om-oss", opened_urls)
+            # Budget was capped at max 1 secondary page, so kontakt was not fetched
+            self.assertNotIn("https://www.aelektronikk.no/kontakt", opened_urls)
+            # Total requests: 1 robots + 1 homepage + 1 secondary page = 3 requests
+            self.assertEqual(metrics["requests"], 3)
+

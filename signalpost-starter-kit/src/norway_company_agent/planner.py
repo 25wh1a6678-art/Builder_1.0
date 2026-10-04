@@ -157,6 +157,7 @@ def calculate_expected_yield(
     field_not_applicable: bool,
     consecutive_zero_yields: int = 0,
     estimated_cost: int = 1,
+    has_accounts: bool = False,
 ) -> float:
     """Calculate deterministic expected yield score = (prob_verified * info_value * authority) / cost."""
     if field_not_applicable:
@@ -170,7 +171,10 @@ def calculate_expected_yield(
     if path in {"registry_live", "accounting_obligation", "roles", "locations", "workforce_official"}:
         prob_success = 0.95
     elif path == "financials":
-        prob_success = 0.90 if archetype != CompanyArchetype.RESIDENTIAL_HOUSING else 0.0
+        if archetype == CompanyArchetype.RESIDENTIAL_HOUSING:
+            prob_success = 0.90 if has_accounts else 0.0
+        else:
+            prob_success = 0.90
     elif path == "group":
         prob_success = 0.60 if archetype == CompanyArchetype.COMMERCIAL_OPERATING else 0.10
     elif path in {"website_crawl", "footprint_website"}:
@@ -387,25 +391,36 @@ def plan_company_research(
 
         if path == "locations":
             if use_bulk_baseline:
-                if archetype == CompanyArchetype.COMMERCIAL_OPERATING or (employees is not None and employees > 0):
-                    selected.append(path)
-                    requests_estimate += cost
-                    ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
-                    expected_yields[path] = ey
-                elif archetype == CompanyArchetype.RESIDENTIAL_HOUSING:
+                if archetype == CompanyArchetype.RESIDENTIAL_HOUSING:
                     skipped.append(path)
                     skip_reasons[path] = "Residential housing associations do not maintain commercial operating subunits."
                     requests_saved += cost
                     routing_adapted = True
                     fields_na.append("subunit_locations")
                     expected_yields[path] = 0.0
-                else:
+                elif archetype in {CompanyArchetype.HOLDING_INVESTMENT, CompanyArchetype.SMALL_OR_DORMANT}:
                     skipped.append(path)
                     skip_reasons[path] = "Entity without registered active employees does not maintain distinct operational subunit locations."
                     requests_saved += cost
                     routing_adapted = True
                     fields_na.append("subunit_locations")
                     expected_yields[path] = 0.0
+                else:
+                    reg_val = profile.get("evidence", {}).get("registry", {}).get("value") or profile.get("raw") or {}
+                    har_ansatte = str(reg_val.get("harRegistrertAntallAnsatte") or "").lower() == "true"
+                    has_active_workforce = (employees is not None and employees > 0) or har_ansatte
+                    if has_active_workforce:
+                        selected.append(path)
+                        requests_estimate += cost
+                        ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                        expected_yields[path] = ey
+                    else:
+                        skipped.append(path)
+                        skip_reasons[path] = "Entity without registered active employees or operational workplaces in snapshot; subunit query deferred."
+                        requests_saved += cost
+                        routing_adapted = True
+                        fields_na.append("subunit_locations")
+                        expected_yields[path] = 0.0
             else:
                 selected.append(path)
                 requests_estimate += cost
@@ -414,9 +429,16 @@ def plan_company_research(
             continue
 
         if path == "financials":
-            if form in {"BRL", "ESEK", "SAM"}:
+            reg_val = profile.get("evidence", {}).get("registry", {}).get("value")
+            latest_accounts = (
+                profile.get("latest_submitted_accounts")
+                or (reg_val.get("sisteInnsendteAarsregnskap") if isinstance(reg_val, dict) else None)
+                or (profile.get("raw", {}).get("sisteInnsendteAarsregnskap") if isinstance(profile.get("raw"), dict) else None)
+            )
+            has_accounts = bool(latest_accounts)
+            if form in {"BRL", "ESEK", "SAM"} and not has_accounts:
                 skipped.append(path)
-                skip_reasons[path] = f"Legal form '{form}' is not subject to Regnskapsregisteret commercial filing obligation."
+                skip_reasons[path] = f"Legal form '{form}' without submitted accounts; Regnskapsregisteret commercial filing obligation not applicable."
                 requests_saved += cost
                 routing_adapted = True
                 fields_na.append("financials")
@@ -424,7 +446,7 @@ def plan_company_research(
             else:
                 selected.append(path)
                 requests_estimate += cost
-                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost, has_accounts=has_accounts)
                 expected_yields[path] = ey
             continue
 

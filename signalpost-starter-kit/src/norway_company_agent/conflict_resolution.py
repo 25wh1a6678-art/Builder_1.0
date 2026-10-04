@@ -200,6 +200,12 @@ def resolve_business_description_conflict(
     website_url: str = "",
 ) -> ConflictResolutionRecord:
     """Synthesize multi-view description preserving statutory purpose and operational website description."""
+    if isinstance(statutory_purpose, list):
+        statutory_purpose = " ".join(str(s) for s in statutory_purpose if s)
+    statutory_purpose = str(statutory_purpose or "").strip()
+    if isinstance(website_description, list):
+        website_description = " ".join(str(s) for s in website_description if s)
+    website_description = str(website_description or "").strip()
     variants = []
     if statutory_purpose:
         variants.append(SourceFactVariant(
