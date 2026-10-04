@@ -84,12 +84,29 @@ class TestV10BulkBaseline(unittest.TestCase):
         comm_profile = dict(self.sample_profile)
         comm_profile["website"] = "https://www.arkitekt-vikoren.no"
         comm_profile["employees"] = 4
+        # Architecture (71.110): preserves website and financials; reviews deferred as non-craftsman
         plan = plan_company_research(comm_profile, use_bulk_baseline=True)
         self.assertEqual(plan.archetype, CompanyArchetype.COMMERCIAL_OPERATING)
         self.assertTrue(plan.should_execute("website_crawl"))
-        self.assertTrue(plan.should_execute("workforce_external_jobs"))
-        self.assertTrue(plan.should_execute("reviews_local_presence"))
         self.assertTrue(plan.should_execute("financials"))
+        self.assertFalse(plan.should_execute("workforce_external_jobs"))
+        self.assertIn("expected yield", plan.skip_reasons["workforce_external_jobs"])
+        self.assertFalse(plan.should_execute("reviews_local_presence"))
+        self.assertIn("Fagfolkguiden", plan.skip_reasons["reviews_local_presence"])
+
+        # Craftsman/trade company (43.210 Electrical): preserves reviews_local_presence
+        trade_profile = dict(comm_profile, industry_code="43.210", industry_label="Elektrisk installasjonsarbeid")
+        plan_trade = plan_company_research(trade_profile, use_bulk_baseline=True)
+        self.assertTrue(plan_trade.should_execute("reviews_local_presence"))
+
+    def test_planner_housing_skips_website_crawl(self):
+        housing_profile = dict(self.sample_profile)
+        housing_profile["legal_form"] = "BRL"
+        housing_profile["name"] = "VIK BORETTSLAG"
+        housing_profile["website"] = "https://www.obos.no"
+        plan = plan_company_research(housing_profile, use_bulk_baseline=True)
+        self.assertFalse(plan.should_execute("website_crawl"))
+        self.assertIn("property management", plan.skip_reasons["website_crawl"])
 
     def test_planner_defers_external_noise_for_dormant_and_housing(self):
         housing_profile = dict(self.sample_profile)

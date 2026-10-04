@@ -105,6 +105,11 @@ def main() -> None:
         if "website" in requested_modules and plan.should_execute("website_crawl"):
             website_record, website_metrics = fetch_website(profile.get("website"), profile=profile)
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+            if profile.get("website"):
+                from norway_company_agent.planner import GLOBAL_DEDUPLICATOR
+                st = website_record.get("status")
+                if st in ("blocked", "source_error"):
+                    GLOBAL_DEDUPLICATOR.record_outcome(profile.get("website"), "blocked")
         elif "website" in requested_modules:
             profile["evidence"]["website"] = evidence(
                 "website", "not_found", "registry_linked_company_website",

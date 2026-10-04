@@ -49,6 +49,17 @@ CORE_TARGET_FIELDS = [
     "statutory_workforce",
 ]
 
+# NACE 2-digit divisions eligible for local craftsman/trade review directories (Fagfolkguiden)
+REVIEW_ELIGIBLE_NACE_DIVISIONS = {
+    "41",  # Construction of buildings (Oppføring av bygninger)
+    "42",  # Civil engineering (Anleggsvirksomhet)
+    "43",  # Specialised construction activities (Spesialisert bygge- og anleggsvirksomhet)
+    "47",  # Retail trade (Detaljhandel / bilforhandlere)
+    "86",  # Human health activities (Tannlege / klinikker)
+    "95",  # Repair of computers and personal/household goods (Reparasjon)
+    "96",  # Other personal service activities (Frisør, skjønnhetspleie, begravelsesbyrå)
+}
+
 EXTERNAL_TARGET_FIELDS = [
     "official_website_footprint",
     "public_profile_observations",
@@ -158,6 +169,8 @@ def calculate_expected_yield(
     consecutive_zero_yields: int = 0,
     estimated_cost: int = 1,
     has_accounts: bool = False,
+    use_bulk_baseline: bool = False,
+    nace_code: str | None = None,
 ) -> float:
     """Calculate deterministic expected yield score = (prob_verified * info_value * authority) / cost."""
     if field_not_applicable:
@@ -180,14 +193,20 @@ def calculate_expected_yield(
     elif path in {"website_crawl", "footprint_website"}:
         prob_success = 0.88 if has_website else 0.05
     elif path == "workforce_external_jobs":
-        if archetype == CompanyArchetype.COMMERCIAL_OPERATING and is_commercial:
+        if use_bulk_baseline:
+            # Empirical batch success probability is 0.05 due to Aa-registeret bulk coverage and NAV rate-limiting
+            prob_success = 0.05
+        elif archetype == CompanyArchetype.COMMERCIAL_OPERATING and is_commercial:
             prob_success = 0.65
         elif archetype == CompanyArchetype.SMALL_OR_DORMANT:
             prob_success = 0.20
         else:
             prob_success = 0.05
     elif path == "reviews_local_presence":
-        if archetype == CompanyArchetype.COMMERCIAL_OPERATING and has_website:
+        nace_div = str(nace_code or "").strip()[:2]
+        if use_bulk_baseline and nace_div and nace_div not in REVIEW_ELIGIBLE_NACE_DIVISIONS:
+            prob_success = 0.05
+        elif archetype == CompanyArchetype.COMMERCIAL_OPERATING and has_website:
             prob_success = 0.55
         else:
             prob_success = 0.05
@@ -481,7 +500,14 @@ def plan_company_research(
             continue
 
         if path in {"website_crawl", "footprint_website"}:
-            if not website_declared:
+            if archetype == CompanyArchetype.RESIDENTIAL_HOUSING:
+                skipped.append(path)
+                skip_reasons[path] = "Residential housing associations (BRL/ESEK) do not operate independent commercial websites; registry URLs refer to property management services."
+                requests_saved += cost
+                routing_adapted = True
+                fields_na.append(path)
+                expected_yields[path] = 0.0
+            elif not website_declared:
                 skipped.append(path)
                 skip_reasons[path] = "No official website URL declared in open entity registry; blind domain speculation avoided."
                 requests_saved += cost
@@ -491,7 +517,7 @@ def plan_company_research(
             else:
                 selected.append(path)
                 requests_estimate += cost
-                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost, use_bulk_baseline=use_bulk_baseline)
                 expected_yields[path] = ey
             continue
 
@@ -510,17 +536,29 @@ def plan_company_research(
                 routing_adapted = True
                 fields_na.append("hiring_activity")
                 expected_yields[path] = 0.0
-            elif use_bulk_baseline and archetype == CompanyArchetype.SMALL_OR_DORMANT and not is_commercial:
-                skipped.append(path)
-                skip_reasons[path] = "Small or dormant entity with zero registered employees does not recruit operational staff on public job boards."
-                requests_saved += cost
-                routing_adapted = True
-                fields_na.append("hiring_activity")
-                expected_yields[path] = 0.0
+            elif use_bulk_baseline:
+                reg_val = profile.get("evidence", {}).get("registry", {}).get("value") or profile.get("raw") or {}
+                har_ansatte = str(reg_val.get("harRegistrertAntallAnsatte") or "").lower() == "true"
+                emp_count = profile.get("employees")
+                has_registered_employer_status = (emp_count is not None and emp_count > 0) or har_ansatte
+                if not has_registered_employer_status:
+                    skipped.append(path)
+                    skip_reasons[path] = "Entity without registered employer status (harRegistrertAntallAnsatte: false) or recorded workforce does not recruit staff on public job boards."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("hiring_activity")
+                    expected_yields[path] = 0.0
+                else:
+                    skipped.append(path)
+                    skip_reasons[path] = "Public job board unauthenticated search expected yield (0.049) is below routing threshold (0.20); statutory workforce reporting verified from registry."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("hiring_activity")
+                    expected_yields[path] = 0.0
             else:
                 selected.append(path)
                 requests_estimate += cost
-                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost, use_bulk_baseline=use_bulk_baseline)
                 expected_yields[path] = ey
             continue
 
@@ -546,10 +584,25 @@ def plan_company_research(
                 routing_adapted = True
                 fields_na.append("customer_reviews_sentiment")
                 expected_yields[path] = 0.0
+            elif use_bulk_baseline:
+                nace_div = str(profile.get("industry_code") or "").strip()[:2]
+                nace_label = str(profile.get("industry_label") or "")
+                if nace_div and nace_div not in REVIEW_ELIGIBLE_NACE_DIVISIONS:
+                    skipped.append(path)
+                    skip_reasons[path] = f"Entity NACE division '{nace_div}' ({nace_label}) operates outside local craftsman and consumer review directory coverage (Fagfolkguiden); zero-yield query avoided."
+                    requests_saved += cost
+                    routing_adapted = True
+                    fields_na.append("customer_reviews_sentiment")
+                    expected_yields[path] = 0.0
+                else:
+                    selected.append(path)
+                    requests_estimate += cost
+                    ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost, use_bulk_baseline=use_bulk_baseline, nace_code=profile.get("industry_code"))
+                    expected_yields[path] = ey
             else:
                 selected.append(path)
                 requests_estimate += cost
-                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost)
+                ey = calculate_expected_yield(path, archetype, website_declared, is_commercial, False, False, dim_count, cost, use_bulk_baseline=use_bulk_baseline, nace_code=profile.get("industry_code"))
                 expected_yields[path] = ey
             continue
 
